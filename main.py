@@ -1,17 +1,33 @@
 """Dataset analysis and feature extraction entry point."""
 
+# utils
 import argparse
-from itertools import combinations
+from itertools import combinations, product
 import os
 import random
 from typing import Dict, cast
 
+# data science
 import importlib
+import matplotlib
 import matplotlib.pyplot as plt
+from matplotlib import cm
 import pandas as pd
+
+# EDA
 from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
+from matplotlib.lines import Line2D
+
+# models
+from sklearn.svm import SVC
+from sklearn.model_selection import KFold, cross_val_score, StratifiedKFold
+from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingClassifier
+
+# metrics
+from sklearn.metrics import (f1_score, accuracy_score,
+                            recall_score, precision_score)
 
 from __init__ import (
     CLASSES,
@@ -21,6 +37,7 @@ from __init__ import (
     TRAIN_TEST_VAL,
     class_files,
     get_entry,
+    load_metadata_splits,
     sample_stats,
     visual_file,
 )
@@ -33,6 +50,7 @@ from spectrograms import (
     plot_spectrogram_2,
     plot_train_correlation_matrices,
     plot_train_feature_boxplots,
+    plot_feature_boxplots,
 )
 
 librosa = importlib.import_module("librosa")
@@ -110,18 +128,15 @@ def read_metadata(*, save_stats_plots: bool) -> dict[str, object]:
 
 
 def build_split_lists(verbose: bool = False) -> None:
-    """Compute train/test/validation file lists for every class."""
-    for class_name in CLASSES:
-        entries = class_files(class_name)
-        train_count, test_count, val_count = TRAIN_TEST_VAL[class_name]
-        if verbose:
+    """Reload complete metadata rows into the train/test/validation lists."""
+    load_metadata_splits()
+    if verbose:
+        for class_name in CLASSES:
             print(
-                f"class={class_name}; train={train_count}, "
-                f"test={test_count}, val={val_count}; total={len(entries)}"
+                f"class={class_name}; train={TRAIN_TEST_VAL[class_name][0]}, "
+                f"test={TRAIN_TEST_VAL[class_name][1]}, "
+                f"val={TRAIN_TEST_VAL[class_name][2]}"
             )
-        TRAIN.extend(entries[:train_count])
-        TEST.extend(entries[train_count:train_count + test_count])
-        VAL.extend(entries[train_count + test_count:])
 
 
 def plot_PCA(
@@ -173,26 +188,41 @@ def plot_PCA(
 
     component_pairs = list(combinations(range(5), 2))
     fig, axes = plt.subplots(2, 5, figsize=(25, 10), squeeze=False)
-    handles = labels = None
+    class_labels = sorted(projected["label"].dropna().unique())
+    color_map = {
+        label: matplotlib.colormaps["tab20"](index % 20)
+        for index, label in enumerate(class_labels)
+    }
     for ax, (x_component, y_component) in zip(axes.flat, component_pairs):
-        for label, group in projected.groupby("label", sort=True):
-            scatter = ax.scatter(
+        for label in class_labels:
+            group = projected[projected["label"] == label]
+            ax.scatter(
                 group.iloc[:, x_component],
                 group.iloc[:, y_component],
-                label=label,
+                color=color_map[label],
                 alpha=0.7,
                 s=18,
             )
-        if handles is None:
-            handles, labels = ax.get_legend_handles_labels()
         ax.set_xlabel(f"Principal Component {x_component + 1}")
         ax.set_ylabel(f"Principal Component {y_component + 1}")
         ax.set_title(f"PC{x_component + 1} vs PC{y_component + 1}")
         ax.grid(alpha=0.25)
+    handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="w",
+            markerfacecolor=color_map[label],
+            markersize=7,
+            label=label,
+        )
+        for label in class_labels
+    ]
     fig.suptitle("Metadata projected onto all PCA component pairs")
     fig.legend(
         handles,
-        labels,
+        class_labels,
         title="Class",
         loc="center left",
         bbox_to_anchor=(0.91, 0.5),
@@ -293,11 +323,102 @@ def main() -> None:
     feature_table = extract_dataset_features(
         dataframe, include_mel_spectrum=True
     )
+    load_metadata_splits(feature_table=feature_table)
     if not args.skip_feature_dumping:
         feature_table.to_csv("features.csv", index=False)
     plot_train_feature_boxplots(feature_table)
+    plot_feature_boxplots(
+        feature_table,
+        [
+            "rms_dbfs",
+            "crest_factor_db",
+            "noise_floor_dbfs_p10",
+            "signal_level_dbfs_p95",
+            "approx_snr_db",
+            "active_frame_fraction",
+            "spectral_centroid",
+            "spectral_bandwidth",
+            "spectral_rolloff_85",
+            "spectral_flatness",
+            "zero_crossing_rate",
+        ],
+    )
     plot_train_correlation_matrices(feature_table)
 
+param_grid = {
+    "C": [0.1, 1, 10, 100],
+    "gamma": ["scale", 0.01, 0.1, 1],
+    "kernel": ["rbf", "linear"],
+}
+
+def training():
+    train_df = pd.DataFrame(TRAIN).sample(frac=1, random_state=42)
+    x_train = train_df.drop(columns=["label", "filename", "split"])
+    y_train = train_df["label"]
+    print(x_train.iloc[3, :])
+
+    test_df = pd.DataFrame(TEST).sample(frac=1, random_state=42)
+    x_test = test_df.drop(columns=["label", "filename", "split"])
+    y_test = test_df["label"]
+
+    valid_df = pd.DataFrame(VAL).sample(frac=1, random_state=42)
+    x_val = valid_df.drop(columns=["label", "filename", "split"])
+    y_val = valid_df["label"]
+
+    gbc = HistGradientBoostingClassifier()
+
+
+    # ==================================== FIRST MODEL ====================================
+    kfold = StratifiedKFold(
+        n_splits=5,
+        shuffle=True,
+        random_state=42,
+    )
+
+    best_params = None
+    best_cv_score = -1.0
+    for C_, gam, ker in product(
+        param_grid["C"],
+        param_grid["gamma"],
+        param_grid["kernel"],
+    ):
+        svm = SVC(C=C_, kernel=ker, gamma=gam)
+        scores = cross_val_score(svm, x_train, y_train, cv=kfold, scoring='accuracy')
+        mean_score = scores.mean()
+
+        if mean_score > best_cv_score:
+            best_cv_score = mean_score
+            best_params = {
+                "C": C_,
+                "gamma": gam,
+                "kernel": ker,
+            }
+    validation_model = SVC(**best_params)
+    validation_model.fit(x_train, y_train)
+
+    train_valid_df = pd.concat([train_df, valid_df], ignore_index=True)
+
+    x_train_valid = train_valid_df.drop(
+        columns=["label", "filename", "split"]
+    )
+    y_train_valid = train_valid_df["label"]
+
+    final_model = SVC(**best_params)
+    final_model.fit(x_train_valid, y_train_valid)
+
+    test_score = final_model.score(x_test, y_test)
+    print("Test accuracy:", test_score)
+    
+    # ==================================== SECOND MODEL ====================================
+    rfc = RandomForestClassifier()
+    param_grid = {
+        "criterion": ['gini', 'entropy'],
+        "max_depth": [10, 15, 20],
+        "max_features": ["sqtr", "linear"],
+    }
+    
 
 if __name__ == "__main__":
     main()
+    load_metadata_splits()
+    training()

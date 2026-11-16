@@ -18,6 +18,7 @@ __all__ = [
     "calculate_snr",
     "SNR_plot",
     "plot_train_feature_boxplots",
+    "plot_feature_boxplots",
     "plot_train_correlation_matrices",
 ]
 
@@ -177,6 +178,41 @@ def plot_train_feature_boxplots(
         ax.grid(axis="y", alpha=0.3)
         fig.tight_layout()
         fig.savefig(os.path.join(output_directory, f"{column}_by_class.png"), dpi=150)
+        plt.close(fig)
+
+
+def plot_feature_boxplots(
+    feature_table: pd.DataFrame,
+    columns: list[str],
+    output_root: str = "visuals",
+) -> None:
+    """Save train-set class-wise boxplots for selected feature columns."""
+    required = {"label", "split", *columns}
+    missing = required.difference(feature_table.columns)
+    if missing:
+        raise ValueError(f"feature table is missing columns: {sorted(missing)}")
+    train_features = feature_table.loc[feature_table["split"] == "train"]
+    output_directory = Path(output_root) / "EDA" / "train"
+    output_directory.mkdir(parents=True, exist_ok=True)
+    class_names = sorted(train_features["label"].dropna().unique())
+
+    for column in columns:
+        values_by_class = [
+            pd.to_numeric(
+                train_features.loc[train_features["label"] == class_name, column],
+                errors="raise",
+            ).dropna().to_numpy()
+            for class_name in class_names
+        ]
+        fig, ax = plt.subplots(figsize=(16, 8))
+        ax.boxplot(values_by_class, labels=class_names, showmeans=True)
+        ax.set_title(f"{column} by class - train set")
+        ax.set_xlabel("Class")
+        ax.set_ylabel(column)
+        ax.tick_params(axis="x", rotation=45)
+        ax.grid(axis="y", alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(output_directory / f"{column}_by_class.png", dpi=150)
         plt.close(fig)
 
 

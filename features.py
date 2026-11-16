@@ -120,10 +120,11 @@ def extract_dataset_features(
             )
         rows.append({
             **dict(zip(feature_names, values.astype(float))),
+            "filename": row.filename,
             "label": row.label,
             "split": row.split,
             "source_id": row.source_id,
         })
     return pd.DataFrame(
-        rows, columns=feature_names + ["label", "split", "source_id"]
+        rows, columns=feature_names + ["filename", "label", "split", "source_id"]
     )
