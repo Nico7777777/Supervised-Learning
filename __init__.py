@@ -1,5 +1,6 @@
 """Project constants, paths, and dataset metadata."""
 
+from itertools import product
 import os
 import csv
 from pathlib import Path
@@ -58,7 +59,6 @@ FLOAT_METADATA_COLUMNS = (
     "pad_noise_rms",
 )
 EXCLUDED_METADATA_COLUMNS = (
-    "source_id",
     "username",
     "url",
     "orig_file",
@@ -75,9 +75,11 @@ def _fit_outlier_bounds(values: pd.Series) -> tuple[float, float]:
 
 
 def preprocess_audio_features() -> None:
-    """Remove train-fitted IQR outliers and standardize two audio features."""
+    """Standardize audio features and apply robust clipping without dropping samples (Improvement 5)."""
     if not TRAIN or "approx_snr_db" not in TRAIN[0]:
         return
+
+    import numpy as np
 
     train_frame = pd.DataFrame(TRAIN)
     bounds = {
@@ -89,35 +91,28 @@ def preprocess_audio_features() -> None:
         PREPROCESSING_PARAMS[f"{feature}_lower"] = lower
         PREPROCESSING_PARAMS[f"{feature}_upper"] = upper
 
-    kept_entries: dict[str, list[MetadataEntry]] = {}
+    # Apply robust clipping in-place without dropping valid sound events
     for split_name, entries in SPLIT.items():
-        frame = pd.DataFrame(entries)
-        keep = pd.Series(True, index=frame.index)
-        for feature, (lower, upper) in bounds.items():
-            values = pd.to_numeric(frame[feature], errors="raise")
-            keep &= values.between(lower, upper)
-        kept_entries[split_name] = [
-            entry for index, entry in enumerate(entries) if keep.iloc[index]
-        ]
+        for entry in entries:
+            for feature, (lower, upper) in bounds.items():
+                if feature in entry and entry[feature] is not None:
+                    entry[feature] = float(np.clip(float(entry[feature]), lower, upper))
 
-    train_clean = pd.DataFrame(kept_entries["train"])
+    # Fit standard scaler on training split
+    train_clean = pd.DataFrame(TRAIN)
     scaler = StandardScaler()
     scaler.fit(train_clean[list(NORMALIZED_FEATURES)])
     for index, feature in enumerate(NORMALIZED_FEATURES):
         PREPROCESSING_PARAMS[f"{feature}_mean"] = float(scaler.mean_[index])
         PREPROCESSING_PARAMS[f"{feature}_scale"] = float(scaler.scale_[index])
 
-    for split_name, entries in kept_entries.items():
+    # Apply scaling in-place across splits without injecting duplicate _raw columns
+    for split_name, entries in SPLIT.items():
         values = pd.DataFrame(entries)
         scaled = scaler.transform(values[list(NORMALIZED_FEATURES)])
         for row_index, entry in enumerate(entries):
-            for feature in NORMALIZED_FEATURES:
-                entry[f"{feature}_raw"] = float(entry[feature])
             for feature_index, feature in enumerate(NORMALIZED_FEATURES):
                 entry[feature] = float(scaled[row_index, feature_index])
-
-        SPLIT[split_name].clear()
-        SPLIT[split_name].extend(entries)
 
 
 def preprocess_metadata_features() -> None:
@@ -287,3 +282,37 @@ def sample_stats(filename: str, sample_index: int) -> str:
         f"sample_{sample_index}",
         f"statistics_{filename}.txt",
     )
+
+svm_grid = {
+    "C": [0.1, 1, 10, 100],
+    "gamma": ["scale", 0.01, 0.1, 1],
+    "kernel": ["rbf", "linear"],
+}
+svm_combos = list(product(
+    svm_grid["C"],
+    svm_grid["gamma"],
+    svm_grid["kernel"]
+))
+
+gbc_grid = {
+    "learning_rate": [0.05, 0.1],
+    "max_iter": [50, 80],
+    "max_leaf_nodes": [15, 31],
+}
+gbc_combos = list(product(
+    gbc_grid["learning_rate"],
+    gbc_grid["max_iter"],
+    gbc_grid["max_leaf_nodes"],
+))
+
+rf_grid = {
+    "criterion": ['gini', 'entropy'],
+    "max_depth": [10, 15, 20],
+    "max_features": ['sqrt', 'log2'],
+}
+rf_combos = list(product(
+    rf_grid["criterion"],
+    rf_grid["max_depth"],
+    rf_grid["max_features"]
+))
+    

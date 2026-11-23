@@ -5,6 +5,8 @@ import os
 from importlib import import_module
 from typing import Mapping, Optional
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import importlib
 import numpy as np
@@ -20,6 +22,7 @@ __all__ = [
     "plot_train_feature_boxplots",
     "plot_feature_boxplots",
     "plot_train_correlation_matrices",
+    "plot_continuous_distr",
 ]
 
 FRAME_SIZE = 1024
@@ -170,7 +173,7 @@ def plot_train_feature_boxplots(
             raise ValueError(f"no train values available for {column}")
 
         fig, ax = plt.subplots(figsize=(16, 8))
-        ax.boxplot(values_by_class, labels=classes, showmeans=True)
+        ax.boxplot(values_by_class, label=classes, showmeans=True)
         ax.set_title(f"{title} pe clase - setul train")
         ax.set_xlabel("Clasa")
         ax.set_ylabel(title)
@@ -205,7 +208,7 @@ def plot_feature_boxplots(
             for class_name in class_names
         ]
         fig, ax = plt.subplots(figsize=(16, 8))
-        ax.boxplot(values_by_class, labels=class_names, showmeans=True)
+        ax.boxplot(values_by_class, label=class_names, showmeans=True)
         ax.set_title(f"{column} by class - train set")
         ax.set_xlabel("Class")
         ax.set_ylabel(column)

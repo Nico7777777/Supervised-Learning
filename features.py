@@ -62,9 +62,17 @@ def extract_level_features(
             samples, frame_length=512, hop_length=160, center=False,
         )[0],
     }
-    weights = np.maximum(frame_rms, epsilon)
+    # Sound Activity Detection (SAD): frames with energy within 25dB of peak frame
+    active_mask = frame_levels_dbfs >= (np.max(frame_levels_dbfs) - 25.0)
+    if not np.any(active_mask):
+        active_mask = np.ones_like(frame_levels_dbfs, dtype=bool)
+
+    # Active-weighted frames to avoid averaging background silence (Improvement 3)
+    active_weights = np.where(active_mask, frame_rms, epsilon)
+    w = active_weights / np.sum(active_weights)
+
     spectral_aggregates = np.array([
-        np.average(values, weights=weights)
+        np.sum(values * w)
         for values in spectral_features.values()
     ], dtype=np.float32)
 
@@ -74,14 +82,20 @@ def extract_level_features(
     )
     log_mel_spectrogram = librosa.power_to_db(mel_spectrogram, ref=np.max)
     mfcc = librosa.feature.mfcc(S=log_mel_spectrogram, n_mfcc=20)
-    mfcc_features = np.concatenate((np.mean(mfcc, axis=1), np.std(mfcc, axis=1)))
+    
+    # Sound activity-weighted MFCC statistics
+    mfcc_mean = np.sum(mfcc * w, axis=1)
+    mfcc_std = np.sqrt(np.maximum(np.sum(w * (mfcc - mfcc_mean[:, None]) ** 2, axis=1), 0.0))
+    mfcc_features = np.concatenate((mfcc_mean, mfcc_std))
+
     scalar_features = np.array([
         rms_dbfs, crest_db, noise_floor_dbfs, signal_level_dbfs,
         snr_db, active_frame_fraction,
     ], dtype=np.float32)
     features = np.concatenate((scalar_features, spectral_aggregates, mfcc_features))
     if include_mel_spectrum:
-        features = np.concatenate((features, np.mean(log_mel_spectrogram, axis=1)))
+        mel_mean = np.sum(log_mel_spectrogram * w, axis=1)
+        features = np.concatenate((features, mel_mean))
     return features.astype(np.float32)
 
 
